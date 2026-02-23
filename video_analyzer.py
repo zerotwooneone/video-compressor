@@ -146,8 +146,12 @@ def convert_and_verify(stats: VideoStats, crf: int, delete_original: bool) -> Tu
     
     cmd = [
         "ffmpeg", "-y", "-i", str(stats.path),
-        "-c:v", "libx265", "-crf", str(crf),
-        "-preset", "medium", "-c:a", "copy",
+        "-map", "0",           # Map ALL streams (video, multiple audio tracks, subtitles)
+        "-c:v", "libx265",     # Convert the video stream to H.265
+        "-crf", str(crf),      # Apply the quality target
+        "-preset", "medium",   # Set the encoding speed
+        "-c:a", "copy",        # Pass through all audio tracks untouched
+        "-c:s", "copy",        # Pass through all subtitle tracks untouched
         str(out_path)
     ]
     
