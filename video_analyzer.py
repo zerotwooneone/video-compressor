@@ -312,7 +312,19 @@ def main():
 
     # 5. Conversion
     if args.convert:
-        targets = [v for v in analyzed_videos if v.codec.lower() != 'hevc']
+        targets = []
+        for v in analyzed_videos:
+            if v.codec.lower() == 'hevc':
+                continue # Already HEVC
+
+            # Calculate the estimated percentage saved
+            savings_pct = (v.size_bytes - v.est_converted_size_bytes) / max(1, v.size_bytes)
+
+            # Only convert if we estimate at least a 10% space reduction
+            if savings_pct >= 0.10:
+                targets.append(v)
+            elif args.verbose:
+                console.print(f"[dim]Skipping {v.path.name}: Estimated savings too low ({savings_pct:.1%})[/dim]")
         if not targets:
             console.print("[green]All functional files are already HEVC. Nothing to convert.[/green]")
             return
