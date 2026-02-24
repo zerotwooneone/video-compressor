@@ -141,8 +141,8 @@ def convert_and_verify(stats: VideoStats, crf: int, delete_original: bool) -> Tu
     """Converts to H.265, verifies, and cleans up. Returns (Success, Path, Message)."""
     if stats.codec.lower() == 'hevc':
         return True, stats.path, "Skipped (Already HEVC)"
-        
-    out_path = stats.path.with_suffix(f".hevc_crf{crf}.mp4")
+
+    out_path = stats.path.with_suffix(f".hevc_crf{crf}.mkv")
     
     cmd = [
         "ffmpeg", "-y", "-i", str(stats.path),
@@ -150,6 +150,7 @@ def convert_and_verify(stats: VideoStats, crf: int, delete_original: bool) -> Tu
         "-c:v", "libx265",     # Convert the video stream to H.265
         "-crf", str(crf),      # Apply the quality target
         "-preset", "medium",   # Set the encoding speed
+        "-pix_fmt", "yuv420p10le", # Forces 10-bit color depth (Saves HDR, improves SDR)
         "-c:a", "copy",        # Pass through all audio tracks untouched
         "-c:s", "copy",        # Pass through all subtitle tracks untouched
         str(out_path)
