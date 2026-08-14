@@ -39,7 +39,7 @@ uv run video_analyzer.py [TARGET_DIRECTORY] [OPTIONS]
 | `--verbose` | Flag | Prints individual file statistics and error messages during the probe and conversion phases. |
 | `--convert` | Flag | Executes the `ffmpeg` conversion on non-HEVC files found in the target directory. |
 | `--delete-original` | Flag | Deletes the original file **only if** the newly converted file passes a strict `ffprobe` sanity check (valid file + duration match). *Implicitly sets `--convert`.* |
-| `--workers` | Integer | Number of concurrent threads for probing and converting. **Default: CPU Cores - 1** |
+| `--probe-workers` | Integer | Number of concurrent threads for probing and converting. **Default: CPU Cores - 1** |
 
 ---
 
@@ -66,7 +66,7 @@ uv run video_analyzer.py /mnt/storage/tv_shows --crf 30 --delete-original
 ### 4. Maximum CPU Utilization with Verbose Output
 Push the parallelization hard (e.g., 16 workers) and print exactly which files are being processed or if any files are failing the probe.
 ```bash
-uv run video_analyzer.py /mnt/storage/raw_captures --convert --workers 16 --verbose
+uv run video_analyzer.py /mnt/storage/raw_captures --convert --probe-workers --verbose
 ```
 
 ## How the Sanity Check Works
