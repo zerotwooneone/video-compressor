@@ -29,8 +29,17 @@ console = Console()
 # Thread-safe tracker to prevent multiple workers from over-committing disk space
 disk_space_lock = threading.Lock()
 reserved_disk_space = 0
+# --- Globals ---
+SAFE_AUDIO = {"aac", "ac3", "eac3", "mp3", "flac"}
+TEXT_SUBS_TO_CONVERT = {"ass", "ssa"}
 
 # --- Data Models ---
+@dataclass
+class StreamInfo:
+    index: int
+    codec_type: str
+    codec_name: str
+    channels: int = 2
 
 @dataclass
 class VideoStats:
@@ -40,6 +49,7 @@ class VideoStats:
     bitrate_bps: int
     codec: str
     est_converted_size_bytes: int
+    streams: List[StreamInfo]
 
 @dataclass
 class DirStats:
@@ -83,6 +93,13 @@ def estimate_savings(codec: str, size_bytes: int, crf: int, use_nvenc: bool) -> 
     target_ratio = max(0.05, min((1.0 - base_reduction) * crf_multiplier, 1.0))
     return int(size_bytes * target_ratio)
 
+def safe_float(val, default=0.0) -> float:
+    """Defensively parses ffprobe values that might return 'N/A' or None."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 def probe_video(file_path: Path, crf: int, use_nvenc: bool) -> Tuple[Optional[VideoStats], str]:
     """Extracts video metadata concurrently using ffprobe."""
     cmd = [
@@ -94,45 +111,92 @@ def probe_video(file_path: Path, crf: int, use_nvenc: bool) -> Tuple[Optional[Vi
         data = json.loads(result.stdout)
         
         format_info = data.get("format", {})
-        video_streams = [s for s in data.get("streams", []) if s.get("codec_type") == "video"]
+        all_streams = data.get("streams", [])
+        
+        # Filter out cover art to find the actual primary video stream
+        video_streams = [s for s in all_streams if s.get("codec_type") == "video" and s.get("codec_name") not in ("mjpeg", "png")]
         
         if not video_streams:
-            return None, "No video stream found"
+            return None, "No valid video stream found"
             
-        video_stream = video_streams[0]
-        size = int(float(format_info.get("size", 0)))
-        duration = float(format_info.get("duration", 0))
+        main_video = video_streams[0]
+        size = int(safe_float(format_info.get("size", 0)))
+        duration = safe_float(format_info.get("duration", 0))
         
         if size == 0 or duration == 0:
             return None, "Invalid size or duration"
 
-        bitrate = int(format_info.get("bit_rate", 0)) or int((size * 8) / duration)
-        codec = video_stream.get("codec_name", "unknown")
+        bitrate = int(safe_float(format_info.get("bit_rate", 0))) or int((size * 8) / duration)
+        codec = main_video.get("codec_name", "unknown")
         est_size = estimate_savings(codec, size, crf, use_nvenc)
+
+        # Capture explicitly allowed streams, naturally stripping attachments/fonts
+        streams_meta = []
+        for s in all_streams:
+            ctype = s.get("codec_type", "unknown")
+            if ctype not in ("video", "audio", "subtitle"):
+                continue
+                
+            channels = int(safe_float(s.get("channels", 2)))
+            streams_meta.append(StreamInfo(
+                index=int(s.get("index", 0)),
+                codec_type=ctype,
+                codec_name=s.get("codec_name", "unknown"),
+                channels=channels
+            ))
 
         stats = VideoStats(
             path=file_path, size_bytes=size, duration_sec=duration,
-            bitrate_bps=bitrate, codec=codec, est_converted_size_bytes=est_size
+            bitrate_bps=bitrate, codec=codec, est_converted_size_bytes=est_size,
+            streams=streams_meta
         )
         return stats, ""
     except Exception as e:
         return None, f"Probe error: {str(e)}"
 
 def build_ffmpeg_cmd(stats: VideoStats, crf: int, use_nvenc: bool, out_path: Path) -> List[str]:
-    """Generates the exact ffmpeg command array based on hardware preferences."""
-    if use_nvenc:
-        video_args = ["-c:v", "hevc_nvenc", "-cq", str(crf), "-preset", "p6", "-profile:v", "main10", "-pix_fmt", "yuv420p10le"]
-    else:
-        video_args = ["-c:v", "libx265", "-crf", str(crf), "-preset", "medium", "-pix_fmt", "yuv420p10le"]
-
-    return [
-        "ffmpeg", "-y", "-i", str(stats.path),
-        "-map", "0"
-    ] + video_args + [
-        "-c:a", "copy",
-        "-c:s", "copy",
-        str(out_path)
-    ]
+    """Generates the exact ffmpeg command array dynamically using absolute mapping."""
+    cmd = ["ffmpeg", "-y", "-i", str(stats.path)]
+    
+    out_idx = 0
+    main_video_encoded = False
+    
+    for stream in stats.streams:
+        # Map the exact input stream to the next available output index
+        cmd.extend(["-map", f"0:{stream.index}"])
+        
+        if stream.codec_type == "video":
+            if stream.codec_name in ("mjpeg", "png"):
+                cmd.extend([f"-c:{out_idx}", "copy"])
+            elif not main_video_encoded:
+                # Primary video transcoding
+                if use_nvenc:
+                    cmd.extend([f"-c:{out_idx}", "hevc_nvenc", "-cq", str(crf), "-preset", "p6", "-profile:v", "main10", "-pix_fmt", "yuv420p10le"])
+                else:
+                    cmd.extend([f"-c:{out_idx}", "libx265", "-crf", str(crf), "-preset", "medium", "-pix_fmt", "yuv420p10le"])
+                main_video_encoded = True
+            else:
+                # Secondary video streams (like behind-the-scenes angles) just copy
+                cmd.extend([f"-c:{out_idx}", "copy"])
+                
+        elif stream.codec_type == "audio":
+            if stream.codec_name not in SAFE_AUDIO:
+                # Dynamically calculate bitrate (e.g., 5.1 audio gets ~576k, stereo gets 192k)
+                kbps = max(192, stream.channels * 96)
+                cmd.extend([f"-c:{out_idx}", "aac", f"-b:{out_idx}", f"{kbps}k"])
+            else:
+                cmd.extend([f"-c:{out_idx}", "copy"])
+                
+        elif stream.codec_type == "subtitle":
+            if stream.codec_name in TEXT_SUBS_TO_CONVERT:
+                cmd.extend([f"-c:{out_idx}", "subrip"])
+            else:
+                cmd.extend([f"-c:{out_idx}", "copy"])
+                
+        out_idx += 1
+            
+    cmd.append(str(out_path))
+    return cmd
 
 def convert_and_verify(stats: VideoStats, crf: int, delete_original: bool, use_nvenc: bool) -> Tuple[bool, Path, str]:
     """The main worker function that safely executes the video conversion."""
