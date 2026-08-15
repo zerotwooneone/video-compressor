@@ -325,7 +325,7 @@ def main():
     # Filter targets
     targets = []
     for v in analyzed_videos:
-        if v.codec.lower() == 'hevc': continue
+        # if v.codec.lower() == 'hevc': continue
         savings_pct = (v.size_bytes - v.est_converted_size_bytes) / max(1, v.size_bytes)
         if savings_pct >= (args.min_savings / 100.0):
             targets.append(v)
